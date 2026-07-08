@@ -216,14 +216,24 @@ def convert_lane3d_labels(input_dir, output_dir):
     shutil.rmtree(input_dir)
 
 
-def expand_training_set(dataset_dir, fract=0.25):
-    val_images_dir = dataset_dir + "/images/val"
-    val_labels_dir = dataset_dir + "/labels/val"
+def expand_training_set_and_split_for_hpo(dataset_dir, fract=0.25, val_fraction=0.2):
+    """
+    Expand the training set by moving 75% of validation samples into training,
+    keeping 25% in val as a held-out test set, then create HPO-specific train/val
+    splits (train_hpo / val_hpo) by reserving 20% of the expanded training set
+    for val_hpo as HPO-specific validation set.
+    """
+    dataset_dir = Path(dataset_dir)
+    val_images_dir = dataset_dir / "images" / "val"
+    val_labels_dir = dataset_dir / "labels" / "val"
+    train_images_dir = dataset_dir / "images" / "train"
+    train_labels_dir = dataset_dir / "labels" / "train"
+    train_hpo_images_dir = dataset_dir / "images" / "train_hpo"
+    train_hpo_labels_dir = dataset_dir / "labels" / "train_hpo"
+    val_hpo_images_dir = dataset_dir / "images" / "val_hpo"
+    val_hpo_labels_dir = dataset_dir / "labels" / "val_hpo"
 
-    train_images_dir = dataset_dir + "/images/train"
-    train_labels_dir = dataset_dir + "/labels/train"
-
-    val_images = [f for f in Path(val_images_dir).rglob("*") if f.is_file()]
+    val_images = [f for f in val_images_dir.rglob("*") if f.is_file()]
     random.shuffle(val_images)
 
     split_idx = int(len(val_images) * fract)
@@ -232,9 +242,9 @@ def expand_training_set(dataset_dir, fract=0.25):
 
     for image in tqdm(train_images, desc="Expand training dataset", unit="file"):
         if image.is_file():
-            target_image = Path(train_images_dir) / image.name
-            label = Path(val_labels_dir) / f"{image.stem}.txt"
-            target_label = Path(train_labels_dir) / f"{image.stem}.txt"
+            target_image = train_images_dir / image.name
+            label = val_labels_dir / f"{image.stem}.txt"
+            target_label = train_labels_dir / f"{image.stem}.txt"
 
             # Move file
             try:
@@ -243,19 +253,8 @@ def expand_training_set(dataset_dir, fract=0.25):
             except Exception as e:
                 print(f"Failed to move {image.name}: {e}")
 
-
-def train_val_split_after_expand(dataset_dir, val_fraction=0.2):
-    """
-    After expanding the training set, perform a new train/val split on the combined training set.
-    Use 25% of the original validation as test set (already in images/val, labels/val).
-    """
     print("Creating HPO train/val split")
 
-    train_images_dir = Path(dataset_dir) / "images" / "train"
-    train_labels_dir = Path(dataset_dir) / "labels" / "train"
-
-    train_hpo_images_dir = Path(dataset_dir) / "images" / "train_hpo"
-    train_hpo_labels_dir = Path(dataset_dir) / "labels" / "train_hpo"
     if train_hpo_images_dir.exists():
         shutil.rmtree(train_hpo_images_dir)
     if train_hpo_labels_dir.exists():
@@ -276,8 +275,6 @@ def train_val_split_after_expand(dataset_dir, val_fraction=0.2):
     split_idx = int(len(all_train_hpo_images) * (1 - val_fraction))
     new_val_hpo_images = all_train_hpo_images[split_idx:]
 
-    val_hpo_images_dir = Path(dataset_dir) / "images/val_hpo"
-    val_hpo_labels_dir = Path(dataset_dir) / "labels/val_hpo"
     if val_hpo_images_dir.exists():
         shutil.rmtree(val_hpo_images_dir)
     if val_hpo_labels_dir.exists():
@@ -356,8 +353,7 @@ if __name__ == '__main__':
 
     convert(input_ds_dir, output_ds_dir)
     
-    expand_training_set(output_ds_dir)
-    train_val_split_after_expand(output_ds_dir)
+    expand_training_set_and_split_for_hpo(output_ds_dir)
 
     # Decode images, resize them so each sample is roughly within trainin input bounds
     # and store them as arrays for faster loading during training
