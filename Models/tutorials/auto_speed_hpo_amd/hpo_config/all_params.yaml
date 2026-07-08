@@ -1,0 +1,84 @@
+# HPO parameter range config for use by tune_autospeed_optuna.py
+
+# Specify min and max values for each tunable param
+# Values will be sampled in this range during HPO
+
+# Key: param name
+# Sample type may be uniform, loguniform or int, determining use of Optuna's sample_uniform, etc
+# Give min and max values, or just a single value
+# Current defaults (used in the Autoware's config) are given in comments
+min_lr: # 1e-4
+  type: "loguniform"
+  min: 1.0e-6
+  max: 1.0e-4     
+max_lr: # 1e-2
+  type: "loguniform"
+  min: 1.0e-4
+  max: 1.0e-2
+momentum: # 0.937
+  type: "uniform"
+  min: 0.8
+  max: 0.98
+weight_decay: # 5e-3
+  type: "loguniform"
+  min: 1.0e-5
+  max: 5.0e-3
+warmup_epochs: # 3
+  type: "int"
+  min: 0
+  max: 4
+box: # 7.5
+  type: "uniform"
+  min: 5.0
+  max: 10.0
+cls: # 0.5
+  type: "uniform"
+  min: 0.2
+  max: 4.0
+dfl: # 1.5
+  type: "uniform"
+  min: 0.5
+  max: 3.0
+hsv_h: # 0.015
+  type: "uniform"
+  min: 0.0
+  max: 0.05
+hsv_s: # 0.7
+  type: "uniform"
+  min: 0.0
+  max: 0.9
+hsv_v: # 0.4
+  type: "uniform"
+  min: 0.0
+  max: 0.9
+degrees: # 0.0
+  type: "uniform"
+  min: -10.0
+  max: 10.0
+translate: # 0.1
+  type: "uniform"
+  min: 0.0
+  max: 0.2
+scale: # 0.5
+  type: "uniform"
+  min: 0.0
+  max: 0.6
+shear: # 0.
+  type: "uniform"
+  min: -10.0
+  max: 10.0
+flip_ud: 0. # 0.
+flip_lr: # 0.5
+  type: "uniform"
+  min: 0.0
+  max: 0.5
+mosaic: # 1.
+  type: "uniform"
+  min: 0.5
+  max: 1.0
+mix_up: # 0.
+  type: "uniform"
+  min: 0.0
+  max: 0.2
+batch_size: 32
+val_batch_size: 64

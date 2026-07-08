@@ -17,7 +17,8 @@ def setup_seed():
     numpy.random.seed(0)
     torch.manual_seed(0)
     torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+    # Make sure deterministic is off, as this slows down execution and is not needed under normal circumstances
+    torch.backends.cudnn.deterministic = False
 
 
 def setup_multi_processes():
@@ -395,6 +396,71 @@ def plot_lr(args, optimizer, scheduler, num_steps):
     pyplot.close()
 
 
+def generate_gt_tensor(targets, batch_size):
+    """
+    Original implmenatation used in __call__ method of ComputeLoss.
+
+    Still used if ComputeLoss.vectorized == False.
+
+    """
+    i = targets[:, 0]
+    _, counts = i.unique(return_counts=True)
+    counts = counts.to(dtype=torch.int32)
+    gt = torch.zeros(batch_size, counts.max(), 5, device=targets.device)
+    for j in range(batch_size):
+        matches = i == j
+        n = matches.sum()
+        if n:
+            gt[j, :n] = targets[matches, 1:]
+
+    return gt
+
+
+def generate_gt_tensor_vectorized(targets, batch_size):
+    """
+    Vectorized version of generate_gt_tensor for better efficiency
+    
+    """
+    # i: batch indices, shape (N,)
+    i = targets[:, 0].long()
+
+    # counts per *present* batch index
+    unique_i, counts = i.unique(return_counts=True)
+    counts = counts.to(torch.int32)
+
+    max_n = counts.max()
+    gt = torch.zeros(batch_size, max_n, 5, device=targets.device, dtype=targets.dtype)
+
+    # --- vectorized equivalent of the loop ---
+
+    # 1. Sort by batch index so each batch's rows are contiguous
+    # Probably is already sorted
+    sorted_idx = torch.argsort(i)             # (N,)
+    i_sorted = i[sorted_idx]                  # (N,)
+    t_sorted = targets[sorted_idx, 1:]        # (N, 5)
+
+    # 2. Count how many rows per batch (including batches that may have zero targets)
+    batch_counts = torch.bincount(i_sorted, minlength=batch_size)  # (batch_size,)
+
+    # 3. Compute starting offsets in the sorted array for each batch
+    offsets = torch.zeros(batch_size, device=targets.device, dtype=torch.long)
+    offsets[1:] = batch_counts.cumsum(0)[:-1]  # prefix sum, shape (batch_size,)
+
+    # 4. For each row k in sorted list, compute its position within its batch: 0..(n_j-1)
+    positions = torch.arange(i_sorted.numel(), device=targets.device) - offsets[i_sorted]
+    # positions.shape == (N,)
+
+    # 5. If you want to be robust in case max_n < max(batch_counts)
+    valid = positions < max_n
+    i_valid = i_sorted[valid]                 # (N_valid,)
+    pos_valid = positions[valid]              # (N_valid,)
+    t_valid = t_sorted[valid]                 # (N_valid, 5)
+
+    # 6. Fill gt using advanced indexing
+    gt[i_valid, pos_valid] = t_valid
+    return gt
+
+
 class CosineLR:
     def __init__(self, args, params, num_steps):
         max_lr = params['max_lr']
@@ -422,7 +488,8 @@ class LinearLR:
         max_lr = params['max_lr']
         min_lr = params['min_lr']
 
-        warmup_steps = int(max(params['warmup_epochs'] * num_steps, 100))
+        # Originally this was max(x, 100), but this causes failure if epochs is small and BS is high
+        warmup_steps = int(params['warmup_epochs'] * num_steps)
         decay_steps = int(args.epochs * num_steps - warmup_steps)
 
         warmup_lr = numpy.linspace(min_lr, max_lr, int(warmup_steps), endpoint=False)
@@ -668,7 +735,7 @@ class BoxLoss(torch.nn.Module):
 
 
 class ComputeLoss:
-    def __init__(self, model, params):
+    def __init__(self, model, params, vectorized=True):
         if hasattr(model, 'module'):
             model = model.module
 
@@ -688,6 +755,8 @@ class ComputeLoss:
         self.assigner = Assigner(nc=self.nc, top_k=10, alpha=0.5, beta=6.0)
 
         self.project = torch.arange(m.ch, dtype=torch.float, device=device)
+
+        self.vectorized = vectorized
 
     def box_decode(self, anchor_points, pred_dist):
         b, a, c = pred_dist.shape
@@ -719,15 +788,11 @@ class ComputeLoss:
         if targets.shape[0] == 0:
             gt = torch.zeros(batch_size, 0, 5, device=self.device)
         else:
-            i = targets[:, 0]
-            _, counts = i.unique(return_counts=True)
-            counts = counts.to(dtype=torch.int32)
-            gt = torch.zeros(batch_size, counts.max(), 5, device=self.device)
-            for j in range(batch_size):
-                matches = i == j
-                n = matches.sum()
-                if n:
-                    gt[j, :n] = targets[matches, 1:]
+            if self.vectorized:
+                gt = generate_gt_tensor_vectorized(targets, batch_size)
+            else:
+                gt = generate_gt_tensor(targets, batch_size)
+
             x = gt[..., 1:5].mul_(input_size[[1, 0, 1, 0]])
             y = torch.empty_like(x)
             dw = x[..., 2] / 2  # half-width

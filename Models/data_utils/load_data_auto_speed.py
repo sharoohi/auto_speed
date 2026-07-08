@@ -7,20 +7,24 @@ import numpy
 import torch
 from PIL import Image
 from torch.utils import data
+import numpy as np
 
 FORMATS = 'bmp', 'dng', 'jpeg', 'jpg', 'mpo', 'png', 'tif', 'tiff', 'webp'
 
 
 class LoadDataAutoSpeed(data.Dataset):
-    def __init__(self, filenames, input_width, input_height, params, augment):
+    def __init__(self, filenames, input_width, input_height, params, augment, is_preprocessed=False):
         self.params = params
         self.mosaic = augment
         self.augment = augment
         self.input_width = input_width
         self.input_height = input_height
+        self.preprocessed = is_preprocessed
+
+        assert len(filenames) > 0, "empty list give as filenames, check that used data_dir exists"
 
         # Read labels
-        labels = self.load_label(filenames)
+        labels = self.load_label(filenames, self.preprocessed)
         self.labels = list(labels.values())
         self.filenames = list(labels.keys())  # update
         self.n = len(self.filenames)  # number of samples
@@ -43,7 +47,7 @@ class LoadDataAutoSpeed(data.Dataset):
                 image, label = mix_up(mix_image1, mix_label1, mix_image2, mix_label2)
         else:
             # Load image
-            image, shape = self.load_image(index)
+            image, shape = self.load_image(index) if not self.preprocessed else self.load_array(index)
             h, w = image.shape[:2]
 
             # Resize
@@ -54,6 +58,7 @@ class LoadDataAutoSpeed(data.Dataset):
                 label[:, 1:] = wh2xy(label[:, 1:], ratio[0] * w, ratio[1] * h, pad[0], pad[1])
             if self.augment:
                 image, label = random_perspective(image, label, self.params)
+
         nl = len(label)  # number of labels
         h, w = image.shape[:2]
         cls = label[:, 0:1]
@@ -102,6 +107,22 @@ class LoadDataAutoSpeed(data.Dataset):
                                interpolation=resample() if self.augment else cv2.INTER_LINEAR)
         return image, (h, w)
 
+    def load_array(self, i):
+        """
+        Used to replace load_image when decoding and resizing has been done in advance
+        """
+        image = np.load(self.filenames[i])
+        assert len(image.shape) == 3
+        h, w = image.shape[:2]
+        assert h <= self.input_height and w <= self.input_width, (
+            f"preprocessed array larger than model input: got {(w, h)} expect <= {(self.input_width, self.input_height)}"
+        )
+        assert h == self.input_height or w == self.input_width, (
+            f"preprocessed array should be aspect-ratio resized to touch one bound: got {(w, h)} "
+            f"for target {(self.input_width, self.input_height)}"
+        )
+        return image, (h, w)
+
     def load_mosaic(self, index, params):
         label4 = []
         border = [-self.input_height // 2, -self.input_width // 2]
@@ -116,7 +137,7 @@ class LoadDataAutoSpeed(data.Dataset):
 
         for i, index in enumerate(indices):
             # Load image
-            image, _ = self.load_image(index)
+            image, _ = self.load_image(index) if not self.preprocessed else self.load_array(index)
             shape = image.shape
             if i == 0:  # top left
                 x1a = max(xc - shape[1], 0)
@@ -199,7 +220,7 @@ class LoadDataAutoSpeed(data.Dataset):
         return torch.stack(samples, dim=0), targets
 
     @staticmethod
-    def load_label(filenames):
+    def load_label(filenames, is_preprocessed=False):
         path = f'{os.path.dirname(filenames[0])}.cache'
         if os.path.exists(path):
             return torch.load(path, weights_only=False)
@@ -207,18 +228,32 @@ class LoadDataAutoSpeed(data.Dataset):
         for filename in filenames:
             try:
                 # verify images
-                with open(filename, 'rb') as f:
-                    image = Image.open(f)
-                    image.verify()  # PIL verify
-                shape = image.size  # image size
-                assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
-                assert image.format.lower() in FORMATS, f'invalid image format {image.format}'
+                if not is_preprocessed:
+                    with open(filename, 'rb') as f:
+                        image = Image.open(f)
+                        image.verify()  # PIL verify
+                    shape = image.size  # image size
+                    assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
+                    assert image.format.lower() in FORMATS, f'invalid image format {image.format}'
+
+                def get_label_path(filename, a, b, is_preprocessed):
+                    path = b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'
+                    if not is_preprocessed:
+                        return path
+
+                    labels_marker = f'{os.sep}labels{os.sep}'
+                    labels_prefix, labels_suffix = path.split(labels_marker, 1)
+                    parts = labels_suffix.split(os.sep)
+                    split_name = parts[0]
+                    if split_name.endswith('_preprocessed'):
+                        parts[0] = split_name[:-len('_preprocessed')]
+                    return labels_prefix + labels_marker + os.sep.join(parts)
 
                 # verify labels
                 a = f'{os.sep}images{os.sep}'
                 b = f'{os.sep}labels{os.sep}'
-                if os.path.isfile(b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'):
-                    with open(b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt') as f:
+                if os.path.isfile(get_label_path(filename, a, b, is_preprocessed)):
+                    with open(get_label_path(filename, a, b, is_preprocessed)) as f:
                         label = [x.split() for x in f.read().strip().splitlines() if len(x)]
                         label = numpy.array(label, dtype=numpy.float32)
                     nl = len(label)
@@ -295,28 +330,28 @@ def augment_hsv(image, params):
     cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR, dst=image)  # no return needed
 
 
-def resize(image, input_width, input_height, augment):
+def resize(image, input_width : int, input_height : int, augment : bool):
     # Resize and pad image while meeting stride-multiple constraints
     shape = image.shape[:2]  # current shape [height, width]
 
     # Scale ratio (new / old)
-    r = min(input_height / shape[0], input_width / shape[1])
+    ratio = min(input_height / shape[0], input_width / shape[1])
     if not augment:  # only scale down, do not scale up (for better val mAP)
-        r = min(r, 1.0)
+        ratio = min(ratio, 1.0)
 
     # Compute padding
-    pad = int(round(shape[1] * r)), int(round(shape[0] * r))
-    w = (input_width - pad[0]) / 2
-    h = (input_height - pad[1]) / 2
+    target_image_size = int(round(shape[1] * ratio)), int(round(shape[0] * ratio))
+    horizontal_padding = (input_width - target_image_size[0]) / 2
+    vertical_padding = (input_height - target_image_size[1]) / 2
 
-    if shape[::-1] != pad:  # resize
+    if shape[::-1] != target_image_size:  # resize
         image = cv2.resize(image,
-                           dsize=pad,
+                           dsize=target_image_size,
                            interpolation=resample() if augment else cv2.INTER_LINEAR)
-    top, bottom = int(round(h - 0.1)), int(round(h + 0.1))
-    left, right = int(round(w - 0.1)), int(round(w + 0.1))
+    top, bottom = int(round(vertical_padding - 0.1)), int(round(vertical_padding + 0.1))
+    left, right = int(round(horizontal_padding - 0.1)), int(round(horizontal_padding + 0.1))
     image = cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT)  # add border
-    return image, (r, r), (w, h)
+    return image, (ratio, ratio), (int(horizontal_padding), int(vertical_padding))
 
 
 def candidates(box1, box2):

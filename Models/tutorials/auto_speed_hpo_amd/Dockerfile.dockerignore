@@ -1,0 +1,10 @@
+# Ignore video and image files to speed up building
+**/*.mp4
+**/*.gif
+**/*.png
+# Also ignore notebooks, which we don't need
+**/*.ipynb
+# We only need the Models directory, so leave out other directories
+VisionPilot/
+Media/
+.git/
